@@ -133,6 +133,7 @@ let lastSnapIdx = -1;
 let cur = {k:null, d:null, kp:null, dp:null};
 let drag = null;
 let wakeLock = null;
+let tempY = null;
 
 // ---------- UI helpers ----------
 const hint = t => $('hint').textContent = t || '';
@@ -156,7 +157,7 @@ function setMode(m){
     lvl:'Коснись пунктирной линии 80, потом линии 20. Можно двигать пальцем.',
     pickK:'Коснись синей линии %K.',
     pickD:'Коснись оранжевой линии %D.',
-    auto:'Коснись пальцем середины окна стохастика — между линиями 80 и 20.',
+    auto:'Коснись пальцем линии 80 в окне стохастика (на экране телефона).',
     none:''
   }[mode]);
 }
@@ -244,9 +245,9 @@ cv.addEventListener('pointerdown', ev => {
     save();
   }
   else if (mode === 'auto') {
-    const r = autoSetup(p);
-    setMode('auto');
-    hint(r);
+    const r = autoTap(p);
+    if (r.keep) { tempY = r.y80; hint(r.msg); }
+    else { tempY = null; setMode('auto'); hint(r.msg); }
   }
   else if (mode === 'pickK' || mode === 'pickD') {
     const c = sampleColor(p);
@@ -279,7 +280,7 @@ window.addEventListener('pointerup', () => {
 });
 
 $('bRoi').onclick = () => setMode('roi');
-$('bAuto').onclick = () => { if (!src) return hint('Сначала нажми «Камера».'); setMode('auto'); };
+$('bAuto').onclick = () => { if (!src) return hint('Сначала нажми «Камера».'); autoY80 = null; tempY = null; setMode('auto'); };
 $('bSwap').onclick = () => { const t = S.kc; S.kc = S.dc; S.dc = t; save(); paintSwatches(); };
 $('bLvl').onclick = () => { if (!S.roi) return hint('Сначала выдели окно стохастика.'); setMode('lvl'); };
 $('bK').onclick = () => setMode('pickK');
@@ -357,11 +358,12 @@ const clamp = v => v == null ? null : Math.max(-10, Math.min(110, v));
 const median = a => { if (!a.length) return null; const s = [...a].sort((x,y)=>x-y); return s[Math.floor(s.length/2)]; };
 
 // ---------- авто-настройка ----------
-// По одному касанию находит линии 80/20, границы окна и цвета %K/%D
-function autoSetup(p){
+// Два касания: по линии 80 и по линии 20. Бот «прилипает» к ближайшей линии,
+// сам находит границы окна, цвета %K/%D и конец линий.
+let autoY80 = null;
+function frame(){
   ctx.drawImage(src, 0, 0, cv.width, cv.height);
   const W = cv.width, H = cv.height, img = ctx.getImageData(0, 0, W, H).data;
-  const px = Math.round(p.x), py = Math.round(p.y);
   const at = (x, y) => { const i = (y * W + x) * 4; return [img[i], img[i+1], img[i+2]]; };
   const df = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]);
   const off = Math.max(3, Math.round(H * 0.004));
@@ -370,75 +372,48 @@ function autoSetup(p){
     const c = at(x, y); return df(c, at(x, y - off)) > 36 && df(c, at(x, y + off)) > 36;
   };
   const onT = (x, y) => on(x, y) || on(x, y - 1) || on(x, y + 1) || on(x, y - 2) || on(x, y + 2);
-  const x0 = Math.max(0, Math.round(px - W * 0.2)), x1 = Math.min(W - 1, Math.round(px + W * 0.2));
-  // доля «линейных» точек в строке; пунктир (перекрестие курсора) отсекаем по разрывам
-  const score = y => {
-    let n = 0, t = 0, gap = 0, maxGap = 0;
-    for (let x = x0; x <= x1; x += 2) { t++; if (onT(x, y)) { n++; gap = 0; } else if (++gap > maxGap) maxGap = gap; }
-    const f = n / t;
-    return (f > 0.5 && maxGap >= 3 && maxGap <= 8 && f < 0.85) ? f * 0.5 : f;
-  };
-  // горизонтальные границы — по длине линий уровней
-  function extent(y, maxGap){
-    maxGap = maxGap || 14;
-    let l = px, r = px, gap = 0;
-    for (let x = px; x >= 0; x--) { if (onT(x, y)) { l = x; gap = 0; } else if (++gap > maxGap) break; }
-    gap = 0;
-    for (let x = px; x < W; x++) { if (onT(x, y)) { r = x; gap = 0; } else if (++gap > maxGap) break; }
-    return [l, r];
+  return {W, H, at, df, off, on, onT};
+}
+// ближайшая к касанию длинная горизонтальная линия
+function snapLine(F, p){
+  const {W, H, onT, off} = F;
+  const x0 = Math.max(0, Math.round(p.x - W * 0.2)), x1 = Math.min(W - 1, Math.round(p.x + W * 0.2));
+  const score = y => { let n = 0, t = 0; for (let x = x0; x <= x1; x += 2) { t++; if (onT(x, y)) n++; } return n / t; };
+  const R = Math.max(14, Math.round(H * 0.03));
+  let best = null, bs = 0;
+  for (let d = 0; d <= R; d++) for (const y of [Math.round(p.y) - d, Math.round(p.y) + d]) {
+    if (y < off + 2 || y > H - off - 3) continue;
+    const s0 = score(y) - d * 0.004; // при равенстве — ближе к пальцу
+    if (s0 > bs) { bs = s0; best = y; }
   }
-  // Линия уровня: длинная и ЦВЕТНАЯ (у Pocket Option 80 — бирюзовая, 20 — жёлтая),
-  // а граница окна и перекрестие курсора — серые
-  function isLevel(y){
-    let n = 0, s = [0,0,0], bgs = [0,0,0];
-    for (let x = x0; x <= x1; x += 2) {
-      let yy = -1; for (const dy of [0,-1,1,-2,2]) if (on(x, y + dy)) { yy = y + dy; break; }
-      if (yy < 0) continue;
-      const c = at(x, yy), u = at(x, yy - off), v = at(x, yy + off);
-      n++; for (let k = 0; k < 3; k++) { s[k] += c[k]; bgs[k] += (u[k] + v[k]) / 2; }
-    }
-    if (!n) return false;
-    const d = s.map((v, k) => (v - bgs[k]) / n);
-    const chroma = Math.max(...d) - Math.min(...d);
-    const [l, r] = extent(y);
-    const len = r - l;
-    // камера «выбеливает» цвета, поэтому очень чёткая сплошная длинная линия тоже подходит
-    return len >= W * 0.2 && (chroma >= 18 || (scoreC(y) >= 0.85 && len >= W * 0.35));
-  }
-  // идём от касания вверх и вниз до первой длинной горизонтальной линии
-  // порог зависит от шума камеры: линия уровня должна заметно выделяться над фоном
-  const lim = Math.round(H * 0.4), sc = new Map();
-  const scoreC = y => { if (!sc.has(y)) sc.set(y, score(y)); return sc.get(y); };
-  const sample = [];
-  for (let y = Math.max(off + 2, py - lim); y < Math.min(H - off - 3, py + lim); y += 3) sample.push(scoreC(y));
-  sample.sort((u, v) => u - v);
-  const thr = Math.max(0.42, (sample[sample.length >> 1] || 0) + 0.3);
-  function scan(dir){
-    // берём БЛИЖАЙШУЮ к пальцу длинную линию (а не самую яркую — иначе ловится граница окна)
-    for (let d = 3; d < lim; d++) {
-      const y = py + dir * d; if (y < off + 2 || y > H - off - 3) break;
-      if (scoreC(y) >= thr) { // уточняем: максимум в соседних строках
-        let by = y, bs = scoreC(y);
-        for (let k = 1; k <= 5; k++) { const yy = y + dir * k, s = scoreC(yy); if (s > bs) { bs = s; by = yy; } }
-        if (isLevel(by)) return by;
-        d += 4; // серая граница, курсор или кусок волны — ищем дальше
-      }
-    }
-    return null;
-  }
-  const y80 = scan(-1), y20 = scan(1);
-  if (y80 == null || y20 == null) return 'Не нашёл линии 80 и 20. Поднеси телефон ближе, чтобы окно стохастика было крупнее, и коснись между линиями 80 и 20 ещё раз.';
-  const e1 = extent(y80), e2 = extent(y20);
-  const left = Math.max(e1[0], e2[0]), right = Math.min(e1[1], e2[1]) - 4;
-  if (right - left < W * 0.15) return 'Окно получилось слишком узким. Поднеси телефон ближе и попробуй ещё раз.';
-  const span = y20 - y80;
+  return bs >= 0.35 ? best : null;
+}
+function extentOf(F, y, x, maxGap){
+  const {W, onT} = F; let l = x, r = x, gap = 0;
+  for (let i = x; i >= 0; i--) { if (onT(i, y)) { l = i; gap = 0; } else if (++gap > maxGap) break; }
+  gap = 0;
+  for (let i = x; i < W; i++) { if (onT(i, y)) { r = i; gap = 0; } else if (++gap > maxGap) break; }
+  return [l, r];
+}
+function autoTap(p){
+  const F = frame(), {W, H, at, df, off} = F;
+  const y = snapLine(F, p);
+  if (y == null) return {msg: 'Не нашёл линию рядом с пальцем. Коснись точнее самой линии' + (autoY80 == null ? ' 80.' : ' 20.')};
+  if (autoY80 == null) { autoY80 = {y, x: Math.round(p.x)}; return {msg: 'Линия 80 найдена ✓ Теперь коснись линии 20.', keep: true, y80: y}; }
+  let y80 = autoY80.y, y20 = y; autoY80 = null;
+  if (y20 < y80) { const t = y80; y80 = y20; y20 = t; }
+  if (y20 - y80 < 8) return {msg: 'Обе точки попали на одну линию. Нажми «🎯 Авто» и коснись сначала линии 80, потом 20.'};
+  // границы окна — по длине линий уровней (разрывы от пересекающих волн допускаем)
+  const g = Math.max(14, Math.round(W * 0.05)), px = Math.round(p.x);
+  const e1 = extentOf(F, y80, px, g), e2 = extentOf(F, y20, px, g);
+  const left = Math.max(e1[0], e2[0]), farRight = Math.max(e1[1], e2[1]);
+  if (farRight - left < W * 0.15) return {msg: 'Окно получилось слишком узким. Поднеси телефон ближе и начни заново: «🎯 Авто».'};
+  const span = y20 - y80, pad = off + 2;
   const top = Math.max(0, Math.round(y80 - span * 0.42)), bot = Math.min(H - 1, Math.round(y20 + span * 0.42));
-  // фон окна и цвета двух линий
-  const pad = off + 1, pix = [];
-  for (let y = top; y <= bot; y += 1) {
-    if (Math.abs(y - y80) <= pad || Math.abs(y - y20) <= pad) continue;
-    for (let x = left; x <= right; x += 2) pix.push(at(x, y));
-  }
+  const skipRow = yy => Math.abs(yy - y80) <= pad || Math.abs(yy - y20) <= pad;
+  // фон и два самых частых цвета в окне — это %K и %D
+  const pix = [];
+  for (let yy = top; yy <= bot; yy++) { if (skipRow(yy)) continue; for (let x = left; x <= farRight; x += 2) pix.push(at(x, yy)); }
   const med = ch => { const a = pix.map(c => c[ch]).sort((u, v) => u - v); return a[a.length >> 1]; };
   const bg = [med(0), med(1), med(2)];
   const bins = new Map();
@@ -448,37 +423,31 @@ function autoSetup(p){
     const b = bins.get(k) || {n:0, r:0, g:0, b:0}; b.n++; b.r += c[0]; b.g += c[1]; b.b += c[2]; bins.set(k, b);
   }
   const list = [...bins.values()].map(b => ({n:b.n, c:[b.r/b.n, b.g/b.n, b.b/b.n]})).sort((a, b) => b.n - a.n);
-  if (!list.length) return 'Не вижу линий стохастика в окне. Проверь, что окно в кадре и экран iPad без бликов.';
-  const A = list[0];
-  const B = list.find(x => df(x.c, A.c) > 110);
-  if (!B) return 'Нашёл только одну линию. Сделай линии на графике толще или ярче и попробуй ещё раз.';
+  if (!list.length) return {msg: 'Не вижу линий стохастика. Проверь, что они в кадре и на iPad нет бликов.'};
+  const A = list[0], B = list.find(x => df(x.c, A.c) > 110);
+  if (!B) return {msg: 'Нашёл только одну линию стохастика. Попробуй ещё раз: «🎯 Авто».'};
   const refine = base => { let n = 0, s = [0,0,0]; for (const c of pix) if (df(c, base) < 75) { n++; s[0]+=c[0]; s[1]+=c[1]; s[2]+=c[2]; } return n ? s.map(v => Math.round(v / n)) : base.map(Math.round); };
   let ca = refine(A.c), cb = refine(B.c);
-  // %K на Pocket Option синяя — у неё больше синего относительно красного
-  if ((cb[2] - cb[0]) > (ca[2] - ca[0])) { const t = ca; ca = cb; cb = t; }
-  S.kc = ca; S.dc = cb;
+  if ((cb[2] - cb[0]) > (ca[2] - ca[0])) { const t = ca; ca = cb; cb = t; } // %K — более синяя
   const dd = Math.sqrt((ca[0]-cb[0])**2 + (ca[1]-cb[1])**2 + (ca[2]-cb[2])**2);
-  S.tol = Math.round(Math.max(35, Math.min(90, dd / 2)));
-  // правая граница — по концу самих линий %K/%D (ищем правее, вплоть до конца линий уровней)
-  // линии уровней местами перекрыты волнами — для дальней границы допускаем большие разрывы
-  const g = Math.round(W * 0.08);
-  const farRight = Math.min(W - 1, Math.max(e1[1], e2[1], extent(y80, g)[1], extent(y20, g)[1]));
-  const tolE = Math.max(35, Math.min(90, dd / 2));
-  const near = (c, k) => Math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) < tolE;
-  // идём вдоль линий слева направо и останавливаемся на разрыве — дальше только подписи шкалы
-  const colHas = x => { let n = 0; for (let y = top; y <= bot; y++) {
-      if (Math.abs(y - y80) <= pad + 2 || Math.abs(y - y20) <= pad + 2) continue;
-      const c = at(x, y); if (near(c, ca) || near(c, cb)) { if (++n >= 2) return true; } } return false; };
-  let lineEnd = right, gapE = 0;
+  const tol = Math.round(Math.max(35, Math.min(90, dd / 2)));
+  const near = (c, k) => Math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) < tol;
+  const colHas = x => { let n = 0; for (let yy = top; yy <= bot; yy++) { if (skipRow(yy)) continue;
+      const c = at(x, yy); if (near(c, ca) || near(c, cb)) { if (++n >= 2) return true; } } return false; };
+  // идём слева направо вдоль линий; конец — там, где начинается разрыв (дальше подписи и полосы)
+  let started = false, lineEnd = -1, gap = 0;
   const G = Math.max(6, Math.round(W * 0.015));
-  for (let x = Math.round((left + right) / 2); x <= farRight; x++) {
-    if (colHas(x)) { lineEnd = x + 2; gapE = 0; } else if (++gapE > G) break;
+  for (let x = left; x <= farRight; x++) {
+    if (colHas(x)) { started = true; lineEnd = x; gap = 0; }
+    else if (started && ++gap > G) break;
   }
-  const roiRight = Math.min(farRight, Math.max(right, lineEnd + Math.round(W * 0.01)));
-  S.roi = { x: left / W, y: top / H, w: (roiRight - left) / W, h: (bot - top) / H };
+  if (lineEnd < 0) return {msg: 'Не нашёл конец линий стохастика. Попробуй ещё раз: «🎯 Авто».'};
+  const right = Math.min(W - 1, lineEnd + Math.max(4, Math.round(W * 0.01)));
+  S.kc = ca; S.dc = cb; S.tol = tol;
+  S.roi = { x: left / W, y: top / H, w: (right - left) / W, h: (bot - top) / H };
   S.y80 = y80 / H; S.y20 = y20 / H;
   save(); paintSwatches(); syncSettings();
-  return 'Готово! Проверь: кружки стоят на концах линий, цифры %K и %D похожи на график. Если %K и %D перепутаны — ⚙︎ → «⇄ Поменять». Потом жми ▶ Слежение.';
+  return {msg: 'Готово! Проверь: красная линия на 80, зелёная на 20, кружки на правых концах линий. Если %K и %D перепутаны — ⚙︎ → «⇄ Поменять». Потом ▶ Слежение.'};
 }
 
 // ---------- candle logic ----------
@@ -567,6 +536,7 @@ function overlay(){
       ctx.fillStyle = c; ctx.fillText(String(lab), r.x + 4, py - 4);
     });
   }
+  if (tempY != null && mode === 'auto') { ctx.strokeStyle = '#f0473c'; ctx.lineWidth = lw * 1.5; ctx.beginPath(); ctx.moveTo(0, tempY); ctx.lineTo(cv.width, tempY); ctx.stroke(); }
   const dot = (p, c) => { if (!p) return; ctx.beginPath(); ctx.arc(p.x, p.y, lw*5, 0, 7); ctx.strokeStyle = '#fff'; ctx.lineWidth = lw*1.5; ctx.stroke(); ctx.fillStyle = c; ctx.fill(); };
   dot(cur.kp, rgb(S.kc)); dot(cur.dp, rgb(S.dc));
 }
