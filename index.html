@@ -219,6 +219,7 @@ function toCanvas(ev){
   return { x: (ev.clientX - r.left) / r.width * cv.width, y: (ev.clientY - r.top) / r.height * cv.height };
 }
 function sampleColor(p){
+  ctx.drawImage(src, 0, 0, cv.width, cv.height); // чистый кадр без рамок
   const x = Math.max(0, Math.round(p.x) - 2), y = Math.max(0, Math.round(p.y) - 2);
   const d = ctx.getImageData(x, y, 5, 5).data;
   // берём самый насыщенный пиксель вокруг касания (линия тонкая)
