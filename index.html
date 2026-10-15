@@ -51,7 +51,7 @@ button:disabled{opacity:.4}
 #signal .cd{font:800 56px var(--mono)}
 #signal .meta{font-size:15px;opacity:.85}
 #log{font:13px var(--mono);color:var(--muted);max-height:90px;overflow:auto;padding-bottom:6px}
-#log div.up{color:var(--up)} #log div.down{color:var(--down)}
+#log div.candle{opacity:.55} #log div.up{color:var(--up)} #log div.down{color:var(--down)}
 #file{display:none}
 </style>
 </head>
@@ -166,6 +166,7 @@ function setMode(m){
 function log(dir, txt){
   const el = document.createElement('div'); el.className = dir; el.textContent = txt;
   $('log').prepend(el);
+  while ($('log').children.length > 40) $('log').lastChild.remove();
 }
 
 // ---------- source ----------
@@ -504,8 +505,10 @@ function findLines(F){
 // насколько область между двумя линиями похожа на окно стохастика
 function pairScore(F, A, B){
   const {W, H, at, df} = F;
-  const l = Math.max(A.l, B.l), r = Math.min(A.r, B.r);
-  if (r - l < W * 0.25 || Math.abs(A.l - B.l) > W * 0.1) return -1;
+  // проверяем общий участок линий, а волны ищем на всей ширине окна (слева линия 20 может быть закрыта волнами)
+  const r = Math.min(A.r, B.r);
+  if (r - Math.max(A.l, B.l) < W * 0.25) return -1;
+  const l = Math.min(A.l, B.l); // начало линии 20 может быть закрыто волнами — не требуем одинакового начала
   if (Math.abs(A.k - B.k) > 0.03) return -1;
   const xm = (l + r) / 2, d = B.yAt(xm) - A.yAt(xm);
   if (d < H * 0.025 || d > H * 0.4) return -1;
@@ -664,6 +667,7 @@ function tick(){
       const snap = { k: median(recent.map(s => s.k)), d: median(recent.map(s => s.d)) };
       closes[idx] = snap;
       const prev = closes[idx - 1];
+      log('candle', `${time()}  K ${snap.k.toFixed(0).padStart(3)}  D ${snap.d.toFixed(0).padStart(3)}`);
       if (prev) check(prev, snap);
       $('state').textContent = 'следит'; missCount = 0;
     } else {
@@ -680,9 +684,12 @@ function tick(){
     Object.keys(closes).forEach(k => { if (k < idx - 5) delete closes[k]; });
   }
 }
+// Пересечение, начавшееся в зоне: на прошлой свече линии были ниже 20 (выше 80),
+// на этой %K пересекла %D. %K на быстрых свечах выскакивает из зоны резко, поэтому
+// на свече пересечения допускаем, что %D уже чуть вышла из зоны (запас 10).
 function check(prev, c){
-  const up = prev.k <= prev.d && c.k > c.d && c.k < S.lo && c.d < S.lo;
-  const down = prev.k >= prev.d && c.k < c.d && c.k > S.hi && c.d > S.hi;
+  const up = prev.k <= prev.d && c.k > c.d && Math.min(prev.k, prev.d) < S.lo && prev.d < S.lo + 5 && c.d < S.lo + 10;
+  const down = prev.k >= prev.d && c.k < c.d && Math.max(prev.k, prev.d) > S.hi && prev.d > S.hi - 5 && c.d > S.hi - 10;
   if (up) fire('up', prev, c);
   else if (down) fire('down', prev, c);
 }
