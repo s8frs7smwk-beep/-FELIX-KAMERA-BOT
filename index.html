@@ -241,7 +241,7 @@ cv.addEventListener('pointerdown', ev => {
     else { // двигаем ближайшую
       if (Math.abs(y - S.y80) < Math.abs(y - S.y20)) S.y80 = y; else S.y20 = y;
     }
-    drag = {type:'lvl'};
+    drag = {type:'lvl'}; S.k80 = S.k20 = 0;
     save();
   }
   else if (mode === 'auto') {
@@ -270,7 +270,7 @@ window.addEventListener('pointerup', () => {
   if (!drag) return;
   if (drag.type === 'roi' && S.roi && S.roi.w > 0.03 && S.roi.h > 0.03) {
     // уровни по умолчанию: 80 и 20 по высоте окна
-    S.y80 = S.roi.y + S.roi.h * 0.2; S.y20 = S.roi.y + S.roi.h * 0.8;
+    S.y80 = S.roi.y + S.roi.h * 0.2; S.y20 = S.roi.y + S.roi.h * 0.8; S.k80 = S.k20 = 0;
     setMode('roi'); hint('Окно выделено. Шаг 2 — «Уровни»: поставь линии точно на 80 и 20.');
   }
   if (drag.type === 'lvl' && S.y80 != null && S.y20 != null) {
@@ -313,8 +313,14 @@ $('bRun').onclick = () => {
 
 // ---------- detection ----------
 function dist(r,g,b,c){ const dr=r-c[0], dg=g-c[1], db=b-c[2]; return Math.sqrt(dr*dr+dg*dg+db*db); }
-function yToVal(yPx){
-  const y80 = S.y80 * cv.height, y20 = S.y20 * cv.height;
+// линии уровней могут идти наискось (телефон стоит под углом) — y зависит от x
+function levelY(which, xPx){
+  const y = (which === 80 ? S.y80 : S.y20) * cv.height;
+  const k = (which === 80 ? S.k80 : S.k20) || 0, xc = (S.xc || 0) * cv.width;
+  return y + k * (xPx - xc);
+}
+function yToVal(xPx, yPx){
+  const y80 = levelY(80, xPx), y20 = levelY(20, xPx);
   if (Math.abs(y20 - y80) < 2) return null;
   return S.lo + (y20 - yPx) / (y20 - y80) * (S.hi - S.lo);
 }
@@ -325,7 +331,7 @@ function findLine(data, w, h, col, skip){
   for (let x = w - 1; x >= 0 && foundCols < 4; x--) {
     let sum = 0, n = 0;
     for (let y = 0; y < h; y++) {
-      if (skip && skip(y)) continue;
+      if (skip && skip(x, y)) continue;
       const i = (y * w + x) * 4;
       if (dist(data[i], data[i+1], data[i+2], col) < tol) { sum += y; n++; }
     }
@@ -346,13 +352,12 @@ function analyse(){
   const data = ctx.getImageData(rx, ry, rw, rh).data;
   // строки возле линий 80/20 не смотрим — чтобы не спутать уровни с линиями стохастика
   const pad = Math.max(2, Math.round(cv.height * 0.003));
-  const l80 = S.y80 == null ? -99 : S.y80 * cv.height - ry, l20 = S.y20 == null ? -99 : S.y20 * cv.height - ry;
-  const skip = y => Math.abs(y - l80) <= pad || Math.abs(y - l20) <= pad;
+  const skip = S.y80 == null ? null : (x, y) => Math.abs(y + ry - levelY(80, x + rx)) <= pad || Math.abs(y + ry - levelY(20, x + rx)) <= pad;
   const kp = findLine(data, rw, rh, S.kc, skip), dp = findLine(data, rw, rh, S.dc, skip);
   cur.kp = kp ? {x: rx + kp.x, y: ry + kp.y} : null;
   cur.dp = dp ? {x: rx + dp.x, y: ry + dp.y} : null;
-  cur.k = cur.kp && S.y80 != null ? clamp(yToVal(cur.kp.y)) : null;
-  cur.d = cur.dp && S.y80 != null ? clamp(yToVal(cur.dp.y)) : null;
+  cur.k = cur.kp && S.y80 != null ? clamp(yToVal(cur.kp.x, cur.kp.y)) : null;
+  cur.d = cur.dp && S.y80 != null ? clamp(yToVal(cur.dp.x, cur.dp.y)) : null;
 }
 const clamp = v => v == null ? null : Math.max(-10, Math.min(110, v));
 const median = a => { if (!a.length) return null; const s = [...a].sort((x,y)=>x-y); return s[Math.floor(s.length/2)]; };
@@ -395,6 +400,33 @@ function extentOf(F, y, x, maxGap){
   for (let i = x; i < W; i++) { if (onT(i, y)) { r = i; gap = 0; } else if (++gap > maxGap) break; }
   return [l, r];
 }
+// идём вдоль линии влево и вправо, подстраиваясь под наклон; возвращаем края и наклон
+function trackLine(F, y0, x0, maxGap){
+  const {W, H, on} = F, pts = [];
+  const walk = dir => {
+    let yc = y0, gap = 0, edge = x0;
+    for (let x = x0; x >= 0 && x < W; x += dir) {
+      let hit = -1;
+      for (const dy of [0, -1, 1, -2, 2]) if (on(x, yc + dy)) { hit = yc + dy; break; }
+      if (hit >= 0) { yc = hit; edge = x; gap = 0; if (x % 3 === 0) pts.push([x, hit]); }
+      else if (++gap > maxGap) break;
+    }
+    return edge;
+  };
+  const l = walk(-1), r = walk(1);
+  // наклон методом наименьших квадратов, с отбрасыванием выбросов (пересечения с волнами)
+  let k = 0, b = y0;
+  for (let it = 0; it < 2 && pts.length > 5; it++) {
+    const use = it === 0 ? pts : pts.filter(([x, y]) => Math.abs(y - (b + k * x)) <= 2.5);
+    if (use.length < 5) break;
+    let sx = 0, sy = 0, sxx = 0, sxy = 0; const n = use.length;
+    for (const [x, y] of use) { sx += x; sy += y; sxx += x * x; sxy += x * y; }
+    const den = n * sxx - sx * sx; if (!den) break;
+    k = (n * sxy - sx * sy) / den; b = (sy - k * sx) / n;
+  }
+  if (Math.abs(k) > 0.15) { k = 0; b = y0; }
+  return {l, r, k, yAt: x => b + k * x};
+}
 function autoTap(p){
   const F = frame(), {W, H, at, df, off} = F;
   const y = snapLine(F, p);
@@ -405,20 +437,23 @@ function autoTap(p){
   if (y20 - y80 < 8) return {msg: 'Обе точки попали на одну линию. Нажми «🎯 Авто» и коснись сначала линии 80, потом 20.'};
   // границы окна — по длине линий уровней (разрывы от пересекающих волн допускаем)
   const g = Math.max(14, Math.round(W * 0.05)), px = Math.round(p.x);
-  const e1 = extentOf(F, y80, px, g), e2 = extentOf(F, y20, px, g);
-  const left = Math.max(e1[0], e2[0]), farRight = Math.max(e1[1], e2[1]);
+  const t1 = trackLine(F, y80, px, g), t2 = trackLine(F, y20, px, g);
+  const left = Math.max(t1.l, t2.l), farRight = Math.max(t1.r, t2.r);
+  const L80 = t1.yAt, L20 = t2.yAt;
   if (farRight - left < W * 0.15) return {msg: 'Окно получилось слишком узким. Поднеси телефон ближе и начни заново: «🎯 Авто».'};
   const span = y20 - y80, pad = off + 2;
-  const top = Math.max(0, Math.round(y80 - span * 0.42)), bot = Math.min(H - 1, Math.round(y20 + span * 0.42));
-  const skipRow = yy => Math.abs(yy - y80) <= pad || Math.abs(yy - y20) <= pad;
+  const top = Math.max(0, Math.round(Math.min(L80(left), L80(farRight)) - span * 0.42));
+  const bot = Math.min(H - 1, Math.round(Math.max(L20(left), L20(farRight)) + span * 0.42));
+  const skipAt = (x, yy) => Math.abs(yy - L80(x)) <= pad || Math.abs(yy - L20(x)) <= pad;
   // фон и два самых частых цвета в окне — это %K и %D
   const pix = [];
-  for (let yy = top; yy <= bot; yy++) { if (skipRow(yy)) continue; for (let x = left; x <= farRight; x += 2) pix.push(at(x, yy)); }
+  for (let yy = top; yy <= bot; yy++) for (let x = left; x <= farRight; x += 2) { if (!skipAt(x, yy)) pix.push(at(x, yy)); }
   const med = ch => { const a = pix.map(c => c[ch]).sort((u, v) => u - v); return a[a.length >> 1]; };
   const bg = [med(0), med(1), med(2)];
   const bins = new Map();
+  const lum = c => c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11, bgL = lum(bg);
   for (const c of pix) {
-    if (df(c, bg) < 90) continue;
+    if (df(c, bg) < 90 || lum(c) < bgL + 25) continue; // линии светлее фона; тёмная рамка iPad — нет
     const k = (c[0] >> 5) * 64 + (c[1] >> 5) * 8 + (c[2] >> 5);
     const b = bins.get(k) || {n:0, r:0, g:0, b:0}; b.n++; b.r += c[0]; b.g += c[1]; b.b += c[2]; bins.set(k, b);
   }
@@ -432,7 +467,7 @@ function autoTap(p){
   const dd = Math.sqrt((ca[0]-cb[0])**2 + (ca[1]-cb[1])**2 + (ca[2]-cb[2])**2);
   const tol = Math.round(Math.max(35, Math.min(90, dd / 2)));
   const near = (c, k) => Math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) < tol;
-  const colHas = x => { let n = 0; for (let yy = top; yy <= bot; yy++) { if (skipRow(yy)) continue;
+  const colHas = x => { let n = 0; for (let yy = top; yy <= bot; yy++) { if (skipAt(x, yy)) continue;
       const c = at(x, yy); if (near(c, ca) || near(c, cb)) { if (++n >= 2) return true; } } return false; };
   // идём слева направо вдоль линий; конец — там, где начинается разрыв (дальше подписи и полосы)
   let started = false, lineEnd = -1, gap = 0;
@@ -445,7 +480,8 @@ function autoTap(p){
   const right = Math.min(W - 1, lineEnd + Math.max(4, Math.round(W * 0.01)));
   S.kc = ca; S.dc = cb; S.tol = tol;
   S.roi = { x: left / W, y: top / H, w: (right - left) / W, h: (bot - top) / H };
-  S.y80 = y80 / H; S.y20 = y20 / H;
+  const xc = (left + right) / 2;
+  S.xc = xc / W; S.y80 = L80(xc) / H; S.y20 = L20(xc) / H; S.k80 = t1.k; S.k20 = t2.k;
   save(); paintSwatches(); syncSettings();
   return {msg: 'Готово! Проверь: красная линия на 80, зелёная на 20, кружки на правых концах линий. Если %K и %D перепутаны — ⚙︎ → «⇄ Поменять». Потом ▶ Слежение.'};
 }
@@ -529,11 +565,11 @@ function overlay(){
     const r = {x:S.roi.x*cv.width, y:S.roi.y*cv.height, w:S.roi.w*cv.width, h:S.roi.h*cv.height};
     ctx.strokeStyle = '#ffffff'; ctx.setLineDash([lw*4, lw*3]); ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
     ctx.font = `bold ${Math.round(lw*9)}px -apple-system,sans-serif`;
-    [[S.y80, S.hi, '#f0473c'], [S.y20, S.lo, '#1fbf75']].forEach(([y, lab, c]) => {
+    [[80, S.y80, S.hi, '#f0473c'], [20, S.y20, S.lo, '#1fbf75']].forEach(([w, y, lab, c]) => {
       if (y == null) return;
-      const py = y * cv.height;
-      ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(r.x, py); ctx.lineTo(r.x + r.w, py); ctx.stroke();
-      ctx.fillStyle = c; ctx.fillText(String(lab), r.x + 4, py - 4);
+      const ya = levelY(w, r.x), yb = levelY(w, r.x + r.w);
+      ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(r.x, ya); ctx.lineTo(r.x + r.w, yb); ctx.stroke();
+      ctx.fillStyle = c; ctx.fillText(String(lab), r.x + 4, ya - 4);
     });
   }
   if (tempY != null && mode === 'auto') { ctx.strokeStyle = '#f0473c'; ctx.lineWidth = lw * 1.5; ctx.beginPath(); ctx.moveTo(0, tempY); ctx.lineTo(cv.width, tempY); ctx.stroke(); }
