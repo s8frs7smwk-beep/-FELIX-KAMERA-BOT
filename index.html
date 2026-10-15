@@ -82,6 +82,7 @@ button:disabled{opacity:.4}
 <div id="settings" hidden>
   <div class="row"><button id="bRoi">Окно</button><button id="bLvl">Уровни</button><button id="bPhoto">Скриншот</button></div>
   <div class="row"><button id="bK"><span class="sw" id="swK"></span>%K</button><button id="bD"><span class="sw" id="swD"></span>%D</button><button id="bSwap">⇄ Поменять</button></div>
+  <div class="row"><button id="bTap">Ручная: 2 касания (80 и 20)</button></div>
   <label>Свеча, сек<input id="sPeriod" type="number" inputmode="numeric" min="5" max="300" value="15"></label>
   <label>Допуск цвета<input id="sTol" type="number" inputmode="numeric" min="10" max="200" value="70"></label>
   <label>Верхний уровень<input id="sHi" type="number" inputmode="numeric" value="80"></label>
@@ -134,6 +135,7 @@ let cur = {k:null, d:null, kp:null, dp:null};
 let drag = null;
 let wakeLock = null;
 let tempY = null;
+let missCount = 0;
 
 // ---------- UI helpers ----------
 const hint = t => $('hint').textContent = t || '';
@@ -149,8 +151,8 @@ function syncSettings(){
 }
 function setMode(m){
   mode = (mode === m) ? 'none' : m;
-  ['bRoi','bLvl','bK','bD','bAuto'].forEach(id => $(id).classList.remove('on'));
-  const map = {roi:'bRoi', lvl:'bLvl', pickK:'bK', pickD:'bD', auto:'bAuto'};
+  ['bRoi','bLvl','bK','bD','bTap'].forEach(id => $(id).classList.remove('on'));
+  const map = {roi:'bRoi', lvl:'bLvl', pickK:'bK', pickD:'bD', auto:'bTap'};
   if (map[mode]) $(map[mode]).classList.add('on');
   hint({
     roi:'Проведи пальцем по диагонали, чтобы выделить окно стохастика. Шкалу цен справа НЕ включай.',
@@ -280,7 +282,12 @@ window.addEventListener('pointerup', () => {
 });
 
 $('bRoi').onclick = () => setMode('roi');
-$('bAuto').onclick = () => { if (!src) return hint('Сначала нажми «Камера».'); autoY80 = null; tempY = null; setMode('auto'); };
+$('bAuto').onclick = () => {
+  if (!src) return hint('Сначала нажми «Камера».');
+  setMode('none'); hint('Ищу стохастик…');
+  setTimeout(() => { const r = fullAuto(); hint(r.msg); }, 30);
+};
+$('bTap').onclick = () => { if (!src) return hint('Сначала нажми «Камера».'); autoY80 = null; tempY = null; setMode('auto'); };
 $('bSwap').onclick = () => { const t = S.kc; S.kc = S.dc; S.dc = t; save(); paintSwatches(); };
 $('bLvl').onclick = () => { if (!S.roi) return hint('Сначала выдели окно стохастика.'); setMode('lvl'); };
 $('bK').onclick = () => setMode('pickK');
@@ -375,7 +382,17 @@ const median = a => { if (!a.length) return null; const s = [...a].sort((x,y)=>x
 let autoY80 = null;
 function frame(){
   ctx.drawImage(src, 0, 0, cv.width, cv.height);
-  const W = cv.width, H = cv.height, img = ctx.getImageData(0, 0, W, H).data;
+  return makeF(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height);
+}
+const oc = document.createElement('canvas'), octx = oc.getContext('2d', {willReadFrequently:true});
+function smallFrame(maxSide){
+  const sc = Math.min(1, maxSide / Math.max(cv.width, cv.height));
+  oc.width = Math.round(cv.width * sc); oc.height = Math.round(cv.height * sc);
+  octx.drawImage(src, 0, 0, oc.width, oc.height);
+  const F = makeF(octx.getImageData(0, 0, oc.width, oc.height).data, oc.width, oc.height);
+  F.sc = sc; return F;
+}
+function makeF(img, W, H){
   const at = (x, y) => { const i = (y * W + x) * 4; return [img[i], img[i+1], img[i+2]]; };
   const df = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]);
   const off = Math.max(3, Math.round(H * 0.004));
@@ -444,6 +461,131 @@ function trackLine(F, y0, x0, maxGap){
   if (Math.abs(k) > 0.15) { k = 0; b = y0; }
   return {l, r, k, yAt: x => b + k * x};
 }
+// ---------- ПОЛНАЯ автонастройка: без касаний ----------
+// Ищем во всём кадре пару длинных горизонтальных линий (80 и 20),
+// между которыми идут две тонкие непрерывные цветные волны (%K и %D).
+function lineChroma(F, t){
+  const {at, on, off} = F; let n = 0, s = [0,0,0], g = [0,0,0];
+  for (let x = t.l; x <= t.r; x += 3) {
+    const y0 = Math.round(t.yAt(x)); let yy = -1;
+    for (const dy of [0,-1,1,-2,2]) if (on(x, y0 + dy)) { yy = y0 + dy; break; }
+    if (yy < 0) continue;
+    const c = at(x, yy), u = at(x, yy - off), v = at(x, yy + off);
+    n++; for (let k = 0; k < 3; k++) { s[k] += c[k]; g[k] += (u[k] + v[k]) / 2; }
+  }
+  if (!n) return 0;
+  const d = s.map((v, k) => (v - g[k]) / n); return Math.max(...d) - Math.min(...d);
+}
+function findLines(F){
+  const {W, H, onT, off} = F, cov = new Float32Array(H);
+  for (let y = off + 2; y < H - off - 3; y++) { let n = 0; for (let x = 0; x < W; x += 2) if (onT(x, y)) n++; cov[y] = n / (W / 2); }
+  const lines = [];
+  for (let y = off + 3; y < H - off - 4; y++) {
+    if (cov[y] < 0.12) continue;
+    let peak = true; for (let d = -3; d <= 3; d++) if (d && cov[y + d] > cov[y]) { peak = false; break; }
+    if (!peak) continue;
+    // середина самого длинного участка линии в этой строке — точка старта
+    let best = [0, 0], st = -1, gap = 0, last = -1;
+    for (let x = 0; x < W; x++) {
+      if (onT(x, y)) { if (st < 0) st = x; last = x; gap = 0; }
+      else if (st >= 0 && ++gap > 4) { if (last - st > best[1] - best[0]) best = [st, last]; st = -1; gap = 0; }
+    }
+    if (st >= 0 && last - st > best[1] - best[0]) best = [st, last];
+    const t = trackLine(F, y, Math.round((best[0] + best[1]) / 2), Math.max(8, Math.round(W * 0.05)));
+    if (t.r - t.l < W * 0.3) continue;
+    const ym = t.yAt((t.l + t.r) / 2);
+    const dup = lines.find(o => Math.abs(o.yAt((t.l + t.r) / 2) - ym) < 4);
+    if (dup) { if (t.r - t.l > dup.r - dup.l) Object.assign(dup, t); continue; }
+    lines.push(t);
+  }
+  lines.forEach(t => t.chroma = lineChroma(F, t));
+  return lines;
+}
+// насколько область между двумя линиями похожа на окно стохастика
+function pairScore(F, A, B){
+  const {W, H, at, df} = F;
+  const l = Math.max(A.l, B.l), r = Math.min(A.r, B.r);
+  if (r - l < W * 0.25 || Math.abs(A.l - B.l) > W * 0.1) return -1;
+  if (Math.abs(A.k - B.k) > 0.03) return -1;
+  const xm = (l + r) / 2, d = B.yAt(xm) - A.yAt(xm);
+  if (d < H * 0.025 || d > H * 0.4) return -1;
+  const top = Math.max(0, Math.round(A.yAt(xm) - d * 0.42)), bot = Math.min(H - 1, Math.round(B.yAt(xm) + d * 0.42));
+  const pad = F.off + 2, skip = (x, y) => Math.abs(y - A.yAt(x)) <= pad || Math.abs(y - B.yAt(x)) <= pad;
+  const pix = [];
+  for (let y = top; y <= bot; y += 2) for (let x = l; x <= r; x += 2) if (!skip(x, y)) pix.push(at(x, y));
+  if (pix.length < 50) return -1;
+  const md = ch => { const a = pix.map(c => c[ch]).sort((u, v) => u - v); return a[a.length >> 1]; };
+  const bg = [md(0), md(1), md(2)], lum = c => c[0]*0.3 + c[1]*0.59 + c[2]*0.11, bgL = lum(bg);
+  const bins = new Map();
+  for (const c of pix) { if (df(c, bg) < 90 || lum(c) < bgL + 25) continue;
+    const k = (c[0] >> 5) * 64 + (c[1] >> 5) * 8 + (c[2] >> 5); const o = bins.get(k) || {n:0, c:[0,0,0]};
+    o.n++; o.c[0] += c[0]; o.c[1] += c[1]; o.c[2] += c[2]; bins.set(k, o); }
+  const list = [...bins.values()].map(o => ({n:o.n, c:o.c.map(v => v / o.n)})).sort((u, v) => v.n - u.n);
+  if (!list.length) return -1;
+  // цвета линий — яркие и сильно отличаются от фона (текстура обоев и стол — нет)
+  const strong = list.filter(o => df(o.c, bg) >= 150 && o.n >= 8);
+  if (!strong.length) return -1;
+  const CA = strong[0].c, Bn = strong.find(o => df(o.c, CA) > 110); if (!Bn) return -1;
+  const CB = Bn.c;
+  // по столбцам: где есть цвет A, где цвет B и насколько «толстые» пятна
+  const cols = [], uA = [], uB = []; let hiN = 0, loN = 0, allN = 0;
+  for (let x = l; x <= r; x += 2) {
+    let na = 0, nb = 0, sa = 0, sb = 0; const ya = A.yAt(x), yb = B.yAt(x), dd = yb - ya;
+    for (let y = top; y <= bot; y++) { if (skip(x, y)) continue; const c = at(x, y);
+      let w = 0; const u = (y - ya) / dd;
+      if (df(c, CA) < 80) { na++; sa += u; w = 1; } else if (df(c, CB) < 80) { nb++; sb += u; w = 1; }
+      if (w) { allN++; if (u < 0.35) hiN++; if (u > 0.65) loN++; } }
+    cols.push([na, nb]); if (na) uA.push(sa / na); if (nb) uB.push(sb / nb);
+  }
+  // волны ходят вверх-вниз; ровные полосы (край iPad, подставка) — нет
+  const sd = a => { if (a.length < 5) return 0; const m = a.reduce((u, v) => u + v, 0) / a.length; return Math.sqrt(a.reduce((u, v) => u + (v - m) ** 2, 0) / a.length); };
+  if (sd(uA) < 0.1 || sd(uB) < 0.1) return -1;
+  // стохастик качается от 80 до 20: волны должны бывать и у верхней линии, и у нижней
+  if (!allN || hiN / allN < 0.08 || loN / allN < 0.08) return -1;
+  const span = (pick) => { let f = -1, la = -1; cols.forEach((c, i) => { if (c[pick]) { if (f < 0) f = i; la = i; } }); return [f, la]; };
+  const [fa, laA] = span(0), [fb, laB] = span(1);
+  if (fa < 0 || fb < 0) return -1;
+  const f0 = Math.max(fa, fb), l0 = Math.min(laA, laB);
+  if ((l0 - f0) * 2 < W * 0.12) return -1;
+  let both = 0, any = 0, hitA = 0, hitB = 0; const thA = [], thB = [];
+  for (let i = f0; i <= l0; i++) { const [na, nb] = cols[i];
+    if (na) hitA++; if (nb) hitB++; if (na || nb) any++; if (na && nb) both++; if (na) thA.push(na); if (nb) thB.push(nb); }
+  const n0 = l0 - f0 + 1, cA = hitA / n0, cB = hitB / n0, co = any ? both / any : 0;
+  const mdn = a => { a.sort((u, v) => u - v); return a[a.length >> 1] || 0; };
+  // обе линии тонкие; свечи, обои и стол — сплошные пятна
+  if (Math.max(mdn(thA), mdn(thB)) > (bot - top) * 0.15) return -1;
+  // %K и %D идут рядом в каждом столбце; красная и зелёная свечи в одном столбце не бывают
+  if (cA < 0.6 || cB < 0.6 || co < 0.45) return -1;
+  let sc = Math.min(cA, cB) + co;
+  if (A.chroma >= 18) sc += 0.25; if (B.chroma >= 18) sc += 0.25;
+  sc += 0.15 * (A.yAt(xm) / H); // окно стохастика обычно внизу
+  return sc;
+}
+function fullAuto(silent){
+  if (!src) return {ok:false, msg:'Сначала нажми «Камера».'};
+  const F = smallFrame(640), lines = findLines(F);
+  let best = null, bs = 0;
+  for (let i = 0; i < lines.length; i++) for (let j = 0; j < lines.length; j++) {
+    if (i === j) continue;
+    const A = lines[i], B = lines[j];
+    if (A.yAt(F.W / 2) >= B.yAt(F.W / 2)) continue;
+    // между 80 и 20 других длинных линий нет
+    const xm0 = (Math.max(A.l, B.l) + Math.min(A.r, B.r)) / 2, ya = A.yAt(xm0), yb = B.yAt(xm0);
+    if (lines.some(o => o !== A && o !== B && o.l < xm0 && o.r > xm0 && o.yAt(xm0) > ya + 4 && o.yAt(xm0) < yb - 4 && o.chroma >= 18)) continue;
+    const s0 = pairScore(F, A, B); if (s0 > bs) { bs = s0; best = [A, B]; }
+  }
+  if (!best) return {ok:false, msg:'Не нашёл стохастик в кадре. Поднеси телефон ближе, чтобы окно стохастика было крупно и без бликов, и нажми «🎯 Авто» ещё раз.'};
+  const [A, B] = best, l = Math.max(A.l, B.l), r = Math.min(A.r, B.r);
+  // точка для «касания» — там, где линии не перекрыты волнами
+  const xm = l + (r - l) * 0.5, sc = F.sc;
+  autoY80 = null;
+  const r1 = autoTap({x: xm / sc, y: A.yAt(xm) / sc});
+  if (!r1.keep) return {ok:false, msg:r1.msg};
+  const r2 = autoTap({x: xm / sc, y: B.yAt(xm) / sc});
+  const ok = /^Готово/.test(r2.msg);
+  return {ok, msg: ok ? 'Готово! Бот сам нашёл стохастик. Проверь кружки на концах линий и жми ▶ Слежение.' : r2.msg};
+}
+
 function autoTap(p){
   const F = frame(), {W, H, at, df, off} = F;
   const y = snapLine(F, p);
@@ -523,10 +665,17 @@ function tick(){
       closes[idx] = snap;
       const prev = closes[idx - 1];
       if (prev) check(prev, snap);
-      $('state').textContent = 'следит';
+      $('state').textContent = 'следит'; missCount = 0;
     } else {
       $('state').textContent = 'не вижу';
       log('', time() + '  линии не найдены на закрытии свечи');
+      // 3 свечи подряд не видно линий — телефон, видимо, сдвинули: перенастраиваемся сами
+      if (++missCount >= 3) {
+        missCount = 0;
+        const r = fullAuto(true);
+        log('', time() + (r.ok ? '  камера сдвинулась — бот перенастроился сам' : '  не могу найти стохастик — поправь телефон'));
+        closes = {};
+      }
     }
     Object.keys(closes).forEach(k => { if (k < idx - 5) delete closes[k]; });
   }
@@ -578,7 +727,7 @@ function draw(){
 function overlay(){
   const lw = Math.max(2, cv.width / 400);
   ctx.lineWidth = lw;
-  if (S.roi) {
+  if (S.roi && mode !== 'auto') {
     const r = {x:S.roi.x*cv.width, y:S.roi.y*cv.height, w:S.roi.w*cv.width, h:S.roi.h*cv.height};
     ctx.strokeStyle = '#ffffff'; ctx.setLineDash([lw*4, lw*3]); ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
     ctx.font = `bold ${Math.round(lw*9)}px -apple-system,sans-serif`;
