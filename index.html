@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Камера бот">
+<title>FELIX Камера бот</title>
+<style>
+:root{
+  --bg:#0b0f14; --panel:#141b24; --line:#26313f; --fg:#e8eef5; --muted:#8a99ab;
+  --accent:#4d8dff; --up:#1fbf75; --down:#f0473c; --warn:#f2b33d;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px}
+body{display:flex;flex-direction:column;padding:env(safe-area-inset-top,0) max(10px,env(safe-area-inset-right,0)) env(safe-area-inset-bottom,0) max(10px,env(safe-area-inset-left,0))}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0}
+header h1{font-size:17px;margin:0;font-weight:700}
+#clock{font:600 15px var(--mono);color:var(--muted)}
+#clock b{color:var(--fg)}
+#stage{position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;background:#000;border-radius:10px;overflow:hidden;touch-action:none}
+#view{max-width:100%;max-height:100%;display:block}
+#hint{position:absolute;left:8px;right:8px;top:8px;background:rgba(0,0,0,.72);border-radius:8px;padding:8px 10px;font-size:14px;line-height:1.35;pointer-events:none}
+#hint:empty{display:none}
+#readout{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:8px 0}
+.cell{background:var(--panel);border-radius:8px;padding:6px 8px;text-align:center}
+.cell small{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.cell b{font:700 18px var(--mono)}
+#kVal{color:var(--kc,#3d7bff)} #dVal{color:var(--dc,#ff8a1f)}
+.bar{display:flex;flex-wrap:wrap;gap:6px;padding-bottom:8px}
+button{font:600 14px var(--sans);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;flex:1 1 auto;min-width:0}
+button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+button.go{background:var(--up);border-color:var(--up);color:#04130b}
+button.stop{background:var(--down);border-color:var(--down);color:#fff}
+button:disabled{opacity:.4}
+.sw{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;margin-right:6px;border:1px solid #fff4}
+#settings{background:var(--panel);border-radius:10px;padding:10px;margin-bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#settings label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+#settings input{font:600 16px var(--mono);background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:8px;width:100%;min-width:0}
+#settings .row{grid-column:1/-1;display:flex;align-items:center;gap:8px}
+#settings .row span{flex:1;font:600 15px var(--mono);text-align:center}
+#signal{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:20;text-align:center;padding:20px}
+#signal.up{background:rgba(9,92,52,.94)} #signal.down{background:rgba(120,20,16,.94)}
+#signal .dir{font-size:64px;font-weight:800;line-height:1}
+#signal .sub{font-size:20px;font-weight:600}
+#signal .cd{font:800 56px var(--mono)}
+#signal .meta{font-size:15px;opacity:.85}
+#log{font:13px var(--mono);color:var(--muted);max-height:90px;overflow:auto;padding-bottom:6px}
+#log div.up{color:var(--up)} #log div.down{color:var(--down)}
+#file{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Камера бот</h1>
+  <div id="clock">свеча <b id="cdNow">--</b>с</div>
+</header>
+
+<div id="stage">
+  <canvas id="view" width="640" height="360"></canvas>
+  <div id="hint">Нажми «Камера», направь телефон на график на iPad.</div>
+</div>
+
+<div id="readout">
+  <div class="cell"><small>%K</small><b id="kVal">—</b></div>
+  <div class="cell"><small>%D</small><b id="dVal">—</b></div>
+  <div class="cell"><small>Зона</small><b id="zone">—</b></div>
+  <div class="cell"><small>Статус</small><b id="state" style="font-size:14px">стоп</b></div>
+</div>
+
+<div class="bar">
+  <button id="bCam">Камера</button>
+  <button id="bPhoto">Скриншот</button>
+  <button id="bRoi">1. Окно</button>
+  <button id="bLvl">2. Уровни</button>
+</div>
+<div class="bar">
+  <button id="bK"><span class="sw" id="swK"></span>3. Линия %K</button>
+  <button id="bD"><span class="sw" id="swD"></span>4. Линия %D</button>
+  <button id="bSet">⚙︎</button>
+</div>
+
+<div id="settings" hidden>
+  <label>Свеча, сек<input id="sPeriod" type="number" inputmode="numeric" min="5" max="300" value="20"></label>
+  <label>Допуск цвета<input id="sTol" type="number" inputmode="numeric" min="10" max="200" value="70"></label>
+  <label>Верхний уровень<input id="sHi" type="number" inputmode="numeric" value="80"></label>
+  <label>Нижний уровень<input id="sLo" type="number" inputmode="numeric" value="20"></label>
+  <div class="row"><button id="oMinus">−0.5 с</button><span id="oVal">сдвиг 0.0 с</span><button id="oPlus">+0.5 с</button></div>
+  <div class="row"><button id="bTestUp">Тест ВВЕРХ</button><button id="bTestDn">Тест ВНИЗ</button></div>
+</div>
+
+<div class="bar">
+  <button id="bRun" class="go">▶ Слежение</button>
+</div>
+<div id="log"></div>
+
+<div id="signal" hidden>
+  <div class="dir" id="sgDir">ВВЕРХ</div>
+  <div class="sub">вход со следующей свечи</div>
+  <div class="cd" id="sgCd">0</div>
+  <div class="meta" id="sgMeta"></div>
+  <button id="sgClose" style="flex:0 0 auto;margin-top:16px;padding:12px 28px">Закрыть</button>
+</div>
+
+<input type="file" id="file" accept="image/*">
+<video id="vid" playsinline muted autoplay style="display:none"></video>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const cv = $('view'), ctx = cv.getContext('2d', {willReadFrequently:true});
+const vid = $('vid');
+const KEY = 'felix-kamera-bot-v1';
+
+// ---------- state ----------
+const S = {
+  roi: null,            // {x,y,w,h} доли кадра
+  y80: null, y20: null, // доли кадра (по вертикали) для верхнего/нижнего уровня
+  kc: [61,123,255], dc: [255,138,31],
+  period: 20, tol: 70, hi: 80, lo: 20, offset: 0
+};
+try { Object.assign(S, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch(e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e) {} };
+
+let src = null;        // video или image
+let mode = 'none';     // roi | lvl | pickK | pickD
+let running = false;
+let audio = null;
+let samples = [];      // {t,k,d}
+let closes = {};       // candleIdx -> {k,d}
+let lastSnapIdx = -1;
+let cur = {k:null, d:null, kp:null, dp:null};
+let drag = null;
+let wakeLock = null;
+
+// ---------- UI helpers ----------
+const hint = t => $('hint').textContent = t || '';
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+function paintSwatches(){
+  $('swK').style.background = rgb(S.kc); $('swD').style.background = rgb(S.dc);
+  document.documentElement.style.setProperty('--kc', rgb(S.kc));
+  document.documentElement.style.setProperty('--dc', rgb(S.dc));
+}
+function syncSettings(){
+  $('sPeriod').value = S.period; $('sTol').value = S.tol; $('sHi').value = S.hi; $('sLo').value = S.lo;
+  $('oVal').textContent = 'сдвиг ' + (S.offset>=0?'+':'') + S.offset.toFixed(1) + ' с';
+}
+function setMode(m){
+  mode = (mode === m) ? 'none' : m;
+  ['bRoi','bLvl','bK','bD'].forEach(id => $(id).classList.remove('on'));
+  const map = {roi:'bRoi', lvl:'bLvl', pickK:'bK', pickD:'bD'};
+  if (map[mode]) $(map[mode]).classList.add('on');
+  hint({
+    roi:'Проведи пальцем по диагонали, чтобы выделить окно стохастика. Шкалу цен справа НЕ включай.',
+    lvl:'Коснись пунктирной линии 80, потом линии 20. Можно двигать пальцем.',
+    pickK:'Коснись синей линии %K.',
+    pickD:'Коснись оранжевой линии %D.',
+    none:''
+  }[mode]);
+}
+function log(dir, txt){
+  const el = document.createElement('div'); el.className = dir; el.textContent = txt;
+  $('log').prepend(el);
+}
+
+// ---------- source ----------
+async function startCamera(){
+  ensureAudio();
+  try {
+    const st = await navigator.mediaDevices.getUserMedia({audio:false, video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}}});
+    vid.srcObject = st; await vid.play();
+    src = vid;
+    hint(S.roi ? 'Камера включена. Проверь, что рамка на окне стохастика.' : 'Камера включена. Шаг 1 — выдели окно стохастика.');
+    requestWake();
+  } catch(e){
+    hint('Камера недоступна: ' + (e.message || e) + '. Открой страницу в Safari и разреши доступ к камере.');
+  }
+}
+$('bPhoto').onclick = () => $('file').click();
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => { src = img; hint('Скриншот загружен — можно настроить окно, уровни и цвета.'); };
+  img.src = URL.createObjectURL(f);
+};
+$('bCam').onclick = startCamera;
+
+async function requestWake(){
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && src === vid) requestWake(); });
+
+// ---------- audio ----------
+function ensureAudio(){
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
+  if (audio && audio.state === 'suspended') audio.resume();
+}
+function beep(up){
+  if (!audio) return;
+  const seq = up ? [660, 880, 1100] : [1100, 880, 660];
+  seq.forEach((f, i) => {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = 'square'; o.frequency.value = f;
+    const t = audio.currentTime + i * 0.18;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + 0.17);
+  });
+}
+
+// ---------- pointer interaction ----------
+function toCanvas(ev){
+  const r = cv.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / r.width * cv.width, y: (ev.clientY - r.top) / r.height * cv.height };
+}
+function sampleColor(p){
+  const x = Math.max(0, Math.round(p.x) - 2), y = Math.max(0, Math.round(p.y) - 2);
+  const d = ctx.getImageData(x, y, 5, 5).data;
+  // берём самый насыщенный пиксель вокруг касания (линия тонкая)
+  let best = null, bs = -1;
+  for (let i = 0; i < d.length; i += 4) {
+    const mx = Math.max(d[i], d[i+1], d[i+2]), mn = Math.min(d[i], d[i+1], d[i+2]);
+    const s = mx - mn;
+    if (s > bs) { bs = s; best = [d[i], d[i+1], d[i+2]]; }
+  }
+  return best;
+}
+cv.addEventListener('pointerdown', ev => {
+  if (!src) return;
+  ev.preventDefault();
+  const p = toCanvas(ev);
+  if (mode === 'roi') drag = {type:'roi', x0:p.x, y0:p.y};
+  else if (mode === 'lvl') {
+    const y = p.y / cv.height;
+    if (S.y80 == null) S.y80 = y;
+    else if (S.y20 == null) S.y20 = y;
+    else { // двигаем ближайшую
+      if (Math.abs(y - S.y80) < Math.abs(y - S.y20)) S.y80 = y; else S.y20 = y;
+    }
+    drag = {type:'lvl'};
+    save();
+  }
+  else if (mode === 'pickK' || mode === 'pickD') {
+    const c = sampleColor(p);
+    if (c) { if (mode === 'pickK') S.kc = c; else S.dc = c; save(); paintSwatches(); }
+    setMode(mode);
+  }
+});
+cv.addEventListener('pointermove', ev => {
+  if (!drag) return;
+  const p = toCanvas(ev);
+  if (drag.type === 'roi') {
+    const x = Math.min(drag.x0, p.x), y = Math.min(drag.y0, p.y);
+    S.roi = { x: x / cv.width, y: y / cv.height, w: Math.abs(p.x - drag.x0) / cv.width, h: Math.abs(p.y - drag.y0) / cv.height };
+  } else if (drag.type === 'lvl') {
+    const y = p.y / cv.height;
+    if (Math.abs(y - S.y80) < Math.abs(y - S.y20)) S.y80 = y; else S.y20 = y;
+  }
+});
+window.addEventListener('pointerup', () => {
+  if (!drag) return;
+  if (drag.type === 'roi' && S.roi && S.roi.w > 0.03 && S.roi.h > 0.03) {
+    // уровни по умолчанию: 80 и 20 по высоте окна
+    S.y80 = S.roi.y + S.roi.h * 0.2; S.y20 = S.roi.y + S.roi.h * 0.8;
+    setMode('roi'); hint('Окно выделено. Шаг 2 — «Уровни»: поставь линии точно на 80 и 20.');
+  }
+  if (drag.type === 'lvl' && S.y80 != null && S.y20 != null) {
+    if (S.y80 > S.y20) { const t = S.y80; S.y80 = S.y20; S.y20 = t; }
+  }
+  drag = null; save();
+});
+
+$('bRoi').onclick = () => setMode('roi');
+$('bLvl').onclick = () => { if (!S.roi) return hint('Сначала выдели окно стохастика.'); setMode('lvl'); };
+$('bK').onclick = () => setMode('pickK');
+$('bD').onclick = () => setMode('pickD');
+$('bSet').onclick = () => { $('settings').hidden = !$('settings').hidden; };
+$('sPeriod').onchange = e => { S.period = Math.max(5, +e.target.value || 20); closes = {}; save(); };
+$('sTol').onchange = e => { S.tol = Math.max(10, +e.target.value || 70); save(); };
+$('sHi').onchange = e => { S.hi = +e.target.value || 80; save(); };
+$('sLo').onchange = e => { S.lo = +e.target.value || 20; save(); };
+$('oMinus').onclick = () => { S.offset -= 0.5; syncSettings(); save(); };
+$('oPlus').onclick = () => { S.offset += 0.5; syncSettings(); save(); };
+$('bTestUp').onclick = () => { ensureAudio(); fire('up', {k:15,d:12}, {k:10,d:13}, true); };
+$('bTestDn').onclick = () => { ensureAudio(); fire('down', {k:85,d:88}, {k:90,d:87}, true); };
+
+$('bRun').onclick = () => {
+  ensureAudio();
+  if (!running) {
+    if (!src) return hint('Сначала включи камеру.');
+    if (!S.roi || S.y80 == null) return hint('Сначала выдели окно и уровни (шаги 1 и 2).');
+    running = true; closes = {}; samples = []; lastSnapIdx = -1;
+    $('bRun').textContent = '■ Остановить'; $('bRun').className = 'stop';
+    $('state').textContent = 'жду';
+    hint(''); setMode('none'); requestWake();
+  } else {
+    running = false;
+    $('bRun').textContent = '▶ Слежение'; $('bRun').className = 'go';
+    $('state').textContent = 'стоп';
+  }
+};
+
+// ---------- detection ----------
+function dist(r,g,b,c){ const dr=r-c[0], dg=g-c[1], db=b-c[2]; return Math.sqrt(dr*dr+dg*dg+db*db); }
+function yToVal(yPx){
+  const y80 = S.y80 * cv.height, y20 = S.y20 * cv.height;
+  if (Math.abs(y20 - y80) < 2) return null;
+  return S.lo + (y20 - yPx) / (y20 - y80) * (S.hi - S.lo);
+}
+// Ищем самый правый участок линии нужного цвета в окне и берём её высоту
+function findLine(data, w, h, col){
+  const tol = S.tol;
+  const ys = []; let foundCols = 0, firstX = -1;
+  for (let x = w - 1; x >= 0 && foundCols < 4; x--) {
+    let sum = 0, n = 0;
+    for (let y = 0; y < h; y++) {
+      const i = (y * w + x) * 4;
+      if (dist(data[i], data[i+1], data[i+2], col) < tol) { sum += y; n++; }
+    }
+    if (n > 0) {
+      if (firstX < 0) firstX = x;
+      if (firstX - x > 10) break;
+      ys.push(sum / n); foundCols++;
+    }
+  }
+  if (!ys.length) return null;
+  ys.sort((a,b) => a-b);
+  return { x: firstX, y: ys[Math.floor(ys.length/2)] };
+}
+function analyse(){
+  if (!S.roi) { cur = {k:null,d:null,kp:null,dp:null}; return; }
+  const rx = Math.round(S.roi.x * cv.width), ry = Math.round(S.roi.y * cv.height);
+  const rw = Math.max(1, Math.round(S.roi.w * cv.width)), rh = Math.max(1, Math.round(S.roi.h * cv.height));
+  const data = ctx.getImageData(rx, ry, rw, rh).data;
+  const kp = findLine(data, rw, rh, S.kc), dp = findLine(data, rw, rh, S.dc);
+  cur.kp = kp ? {x: rx + kp.x, y: ry + kp.y} : null;
+  cur.dp = dp ? {x: rx + dp.x, y: ry + dp.y} : null;
+  cur.k = cur.kp && S.y80 != null ? clamp(yToVal(cur.kp.y)) : null;
+  cur.d = cur.dp && S.y80 != null ? clamp(yToVal(cur.dp.y)) : null;
+}
+const clamp = v => v == null ? null : Math.max(-10, Math.min(110, v));
+const median = a => { if (!a.length) return null; const s = [...a].sort((x,y)=>x-y); return s[Math.floor(s.length/2)]; };
+
+// ---------- candle logic ----------
+function now(){ return Date.now() / 1000 + S.offset; }
+function tick(){
+  const t = now(), P = S.period;
+  const idx = Math.floor(t / P), phase = t - idx * P, left = P - phase;
+  $('cdNow').textContent = left.toFixed(0);
+
+  if (cur.k != null && cur.d != null) samples.push({t, k:cur.k, d:cur.d});
+  samples = samples.filter(s => t - s.t < 1.2);
+
+  if (!running) return;
+  // снимок закрытия свечи за ~0.8 с до конца
+  if (left <= 0.8 && lastSnapIdx !== idx) {
+    lastSnapIdx = idx;
+    const recent = samples.filter(s => t - s.t < 0.7);
+    if (recent.length >= 2) {
+      const snap = { k: median(recent.map(s => s.k)), d: median(recent.map(s => s.d)) };
+      closes[idx] = snap;
+      const prev = closes[idx - 1];
+      if (prev) check(prev, snap);
+      $('state').textContent = 'следит';
+    } else {
+      $('state').textContent = 'не вижу';
+      log('', time() + '  линии не найдены на закрытии свечи');
+    }
+    Object.keys(closes).forEach(k => { if (k < idx - 5) delete closes[k]; });
+  }
+}
+function check(prev, c){
+  const up = prev.k <= prev.d && c.k > c.d && c.k < S.lo && c.d < S.lo;
+  const down = prev.k >= prev.d && c.k < c.d && c.k > S.hi && c.d > S.hi;
+  if (up) fire('up', prev, c);
+  else if (down) fire('down', prev, c);
+}
+function time(){ const d = new Date(Date.now() + S.offset*1000); return d.toTimeString().slice(0,8); }
+
+let sgTimer = null;
+function fire(dir, prev, c, test){
+  beep(dir === 'up');
+  try { navigator.vibrate && navigator.vibrate([200,100,200]); } catch(e) {}
+  const el = $('signal'); el.className = dir; el.hidden = false;
+  $('sgDir').textContent = dir === 'up' ? '▲ ВВЕРХ' : '▼ ВНИЗ';
+  $('sgMeta').textContent = `%K ${c.k.toFixed(0)}  %D ${c.d.toFixed(0)}  ·  экспирация 1 мин` + (test ? '  ·  ТЕСТ' : '');
+  log(dir, `${time()}  ${dir === 'up' ? 'ВВЕРХ' : 'ВНИЗ '}  K ${c.k.toFixed(0)} D ${c.d.toFixed(0)}${test?' (тест)':''}`);
+  clearInterval(sgTimer);
+  const t0 = Date.now();
+  sgTimer = setInterval(() => {
+    const t = now(), P = S.period, left = P - (t - Math.floor(t / P) * P);
+    $('sgCd').textContent = left > P - 1.5 ? 'ВХОДИ' : left.toFixed(0);
+    if (Date.now() - t0 > 12000) { el.hidden = true; clearInterval(sgTimer); }
+  }, 100);
+}
+$('sgClose').onclick = () => { $('signal').hidden = true; clearInterval(sgTimer); };
+
+// ---------- render loop ----------
+function draw(){
+  if (src) {
+    const w = src.videoWidth || src.naturalWidth, h = src.videoHeight || src.naturalHeight;
+    if (w && h) {
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+      ctx.drawImage(src, 0, 0, w, h);
+      analyse();
+      overlay();
+    }
+  }
+  $('kVal').textContent = cur.k == null ? '—' : cur.k.toFixed(0);
+  $('dVal').textContent = cur.d == null ? '—' : cur.d.toFixed(0);
+  const z = (cur.k != null && cur.d != null) ? (cur.k > S.hi && cur.d > S.hi ? '>' + S.hi : cur.k < S.lo && cur.d < S.lo ? '<' + S.lo : 'середина') : '—';
+  $('zone').textContent = z; $('zone').style.fontSize = z === 'середина' ? '13px' : '18px';
+  tick();
+  requestAnimationFrame(draw);
+}
+function overlay(){
+  const lw = Math.max(2, cv.width / 400);
+  ctx.lineWidth = lw;
+  if (S.roi) {
+    const r = {x:S.roi.x*cv.width, y:S.roi.y*cv.height, w:S.roi.w*cv.width, h:S.roi.h*cv.height};
+    ctx.strokeStyle = '#ffffff'; ctx.setLineDash([lw*4, lw*3]); ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
+    ctx.font = `bold ${Math.round(lw*9)}px -apple-system,sans-serif`;
+    [[S.y80, S.hi, '#f0473c'], [S.y20, S.lo, '#1fbf75']].forEach(([y, lab, c]) => {
+      if (y == null) return;
+      const py = y * cv.height;
+      ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(r.x, py); ctx.lineTo(r.x + r.w, py); ctx.stroke();
+      ctx.fillStyle = c; ctx.fillText(String(lab), r.x + 4, py - 4);
+    });
+  }
+  const dot = (p, c) => { if (!p) return; ctx.beginPath(); ctx.arc(p.x, p.y, lw*5, 0, 7); ctx.strokeStyle = '#fff'; ctx.lineWidth = lw*1.5; ctx.stroke(); ctx.fillStyle = c; ctx.fill(); };
+  dot(cur.kp, rgb(S.kc)); dot(cur.dp, rgb(S.dc));
+}
+
+paintSwatches(); syncSettings();
+requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
