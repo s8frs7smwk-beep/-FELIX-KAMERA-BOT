@@ -370,7 +370,7 @@ function autoSetup(p){
     const c = at(x, y); return df(c, at(x, y - off)) > 36 && df(c, at(x, y + off)) > 36;
   };
   const onT = (x, y) => on(x, y) || on(x, y - 1) || on(x, y + 1) || on(x, y - 2) || on(x, y + 2);
-  const x0 = Math.max(0, Math.round(px - W * 0.3)), x1 = Math.min(W - 1, Math.round(px + W * 0.3));
+  const x0 = Math.max(0, Math.round(px - W * 0.2)), x1 = Math.min(W - 1, Math.round(px + W * 0.2));
   // доля «линейных» точек в строке; пунктир (перекрестие курсора) отсекаем по разрывам
   const score = y => {
     let n = 0, t = 0, gap = 0, maxGap = 0;
@@ -378,31 +378,56 @@ function autoSetup(p){
     const f = n / t;
     return (f > 0.5 && maxGap >= 3 && maxGap <= 8 && f < 0.85) ? f * 0.5 : f;
   };
+  // горизонтальные границы — по длине линий уровней
+  function extent(y, maxGap){
+    maxGap = maxGap || 14;
+    let l = px, r = px, gap = 0;
+    for (let x = px; x >= 0; x--) { if (onT(x, y)) { l = x; gap = 0; } else if (++gap > maxGap) break; }
+    gap = 0;
+    for (let x = px; x < W; x++) { if (onT(x, y)) { r = x; gap = 0; } else if (++gap > maxGap) break; }
+    return [l, r];
+  }
+  // Линия уровня: длинная и ЦВЕТНАЯ (у Pocket Option 80 — бирюзовая, 20 — жёлтая),
+  // а граница окна и перекрестие курсора — серые
+  function isLevel(y){
+    let n = 0, s = [0,0,0], bgs = [0,0,0];
+    for (let x = x0; x <= x1; x += 2) {
+      let yy = -1; for (const dy of [0,-1,1,-2,2]) if (on(x, y + dy)) { yy = y + dy; break; }
+      if (yy < 0) continue;
+      const c = at(x, yy), u = at(x, yy - off), v = at(x, yy + off);
+      n++; for (let k = 0; k < 3; k++) { s[k] += c[k]; bgs[k] += (u[k] + v[k]) / 2; }
+    }
+    if (!n) return false;
+    const d = s.map((v, k) => (v - bgs[k]) / n);
+    const chroma = Math.max(...d) - Math.min(...d);
+    const [l, r] = extent(y);
+    const len = r - l;
+    // камера «выбеливает» цвета, поэтому очень чёткая сплошная длинная линия тоже подходит
+    return len >= W * 0.2 && (chroma >= 18 || (scoreC(y) >= 0.85 && len >= W * 0.35));
+  }
   // идём от касания вверх и вниз до первой длинной горизонтальной линии
+  // порог зависит от шума камеры: линия уровня должна заметно выделяться над фоном
+  const lim = Math.round(H * 0.4), sc = new Map();
+  const scoreC = y => { if (!sc.has(y)) sc.set(y, score(y)); return sc.get(y); };
+  const sample = [];
+  for (let y = Math.max(off + 2, py - lim); y < Math.min(H - off - 3, py + lim); y += 3) sample.push(scoreC(y));
+  sample.sort((u, v) => u - v);
+  const thr = Math.max(0.42, (sample[sample.length >> 1] || 0) + 0.3);
   function scan(dir){
-    const lim = Math.round(H * 0.4);
-    for (const thr of [0.6, 0.42]) {
-      for (let d = 4; d < lim; d++) {
-        const y = py + dir * d; if (y < off + 2 || y > H - off - 3) break;
-        if (score(y) >= thr) { // уточняем: максимум в соседних строках
-          let by = y, bs = score(y);
-          for (let k = 1; k <= 4; k++) { const yy = y + dir * k, s = score(yy); if (s > bs) { bs = s; by = yy; } }
-          return by;
-        }
+    // берём БЛИЖАЙШУЮ к пальцу длинную линию (а не самую яркую — иначе ловится граница окна)
+    for (let d = 3; d < lim; d++) {
+      const y = py + dir * d; if (y < off + 2 || y > H - off - 3) break;
+      if (scoreC(y) >= thr) { // уточняем: максимум в соседних строках
+        let by = y, bs = scoreC(y);
+        for (let k = 1; k <= 5; k++) { const yy = y + dir * k, s = scoreC(yy); if (s > bs) { bs = s; by = yy; } }
+        if (isLevel(by)) return by;
+        d += 4; // серая граница, курсор или кусок волны — ищем дальше
       }
     }
     return null;
   }
   const y80 = scan(-1), y20 = scan(1);
   if (y80 == null || y20 == null) return 'Не нашёл линии 80 и 20. Поднеси телефон ближе, чтобы окно стохастика было крупнее, и коснись между линиями 80 и 20 ещё раз.';
-  // горизонтальные границы — по длине линий уровней
-  function extent(y){
-    let l = px, r = px, gap = 0;
-    for (let x = px; x >= 0; x--) { if (onT(x, y)) { l = x; gap = 0; } else if (++gap > 14) break; }
-    gap = 0;
-    for (let x = px; x < W; x++) { if (onT(x, y)) { r = x; gap = 0; } else if (++gap > 14) break; }
-    return [l, r];
-  }
   const e1 = extent(y80), e2 = extent(y20);
   const left = Math.max(e1[0], e2[0]), right = Math.min(e1[1], e2[1]) - 4;
   if (right - left < W * 0.15) return 'Окно получилось слишком узким. Поднеси телефон ближе и попробуй ещё раз.';
@@ -434,7 +459,23 @@ function autoSetup(p){
   S.kc = ca; S.dc = cb;
   const dd = Math.sqrt((ca[0]-cb[0])**2 + (ca[1]-cb[1])**2 + (ca[2]-cb[2])**2);
   S.tol = Math.round(Math.max(35, Math.min(90, dd / 2)));
-  S.roi = { x: left / W, y: top / H, w: (right - left) / W, h: (bot - top) / H };
+  // правая граница — по концу самих линий %K/%D (ищем правее, вплоть до конца линий уровней)
+  // линии уровней местами перекрыты волнами — для дальней границы допускаем большие разрывы
+  const g = Math.round(W * 0.08);
+  const farRight = Math.min(W - 1, Math.max(e1[1], e2[1], extent(y80, g)[1], extent(y20, g)[1]));
+  const tolE = Math.max(35, Math.min(90, dd / 2));
+  const near = (c, k) => Math.sqrt((c[0]-k[0])**2 + (c[1]-k[1])**2 + (c[2]-k[2])**2) < tolE;
+  // идём вдоль линий слева направо и останавливаемся на разрыве — дальше только подписи шкалы
+  const colHas = x => { let n = 0; for (let y = top; y <= bot; y++) {
+      if (Math.abs(y - y80) <= pad + 2 || Math.abs(y - y20) <= pad + 2) continue;
+      const c = at(x, y); if (near(c, ca) || near(c, cb)) { if (++n >= 2) return true; } } return false; };
+  let lineEnd = right, gapE = 0;
+  const G = Math.max(6, Math.round(W * 0.015));
+  for (let x = Math.round((left + right) / 2); x <= farRight; x++) {
+    if (colHas(x)) { lineEnd = x + 2; gapE = 0; } else if (++gapE > G) break;
+  }
+  const roiRight = Math.min(farRight, Math.max(right, lineEnd + Math.round(W * 0.01)));
+  S.roi = { x: left / W, y: top / H, w: (roiRight - left) / W, h: (bot - top) / H };
   S.y80 = y80 / H; S.y20 = y20 / H;
   save(); paintSwatches(); syncSettings();
   return 'Готово! Проверь: кружки стоят на концах линий, цифры %K и %D похожи на график. Если %K и %D перепутаны — ⚙︎ → «⇄ Поменять». Потом жми ▶ Слежение.';
